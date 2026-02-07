@@ -1,162 +1,164 @@
 import time
 import requests
 from datetime import datetime
+from binance.client import Client
+import pytz
 
-# =========================
-# CONFIG
-# =========================
-TELEGRAM_TOKEN = "8420448991:AAG2lkBDA9gUZzHblSbQ48kAbQpYqX7BwJo"
+# ================== CONFIG ==================
+BOT_TOKEN = "8420448991:AAG2lkBDA9gUZzHblSbQ48kAbQpYqX7BwJo"
 CHAT_ID = "5837332461"
 
-BINANCE_API = "https://api.binance.com/api/v3"
-INTERVAL_MAIN = "5m"
-INTERVAL_CONFIRM = "15m"
+MAX_SIGNALS_PER_DAY = 15
+COOLDOWN_HOURS = 12
+INTERVAL = Client.KLINE_INTERVAL_5MINUTE
+TIMEZONE = pytz.UTC
 
-EXCLUDED_COINS = ["BTC", "ETH", "BNB", "SOL"]
-MIN_VOLUME_USDT = 5_000_000  # فلترة العملات الميتة
-CHECK_DELAY = 60  # ثانية
+MIN_24H_VOLUME = 2_000_000      # USDT
+VOLUME_SPIKE_MULTIPLIER = 3
+PRICE_MOVE_MIN = 1.8            # %
 
-sent_alerts = set()
+TP_LEVELS = [0.02, 0.04, 0.06]  # 2% 4% 6%
+SL_PERCENT = 0.03               # 3%
 
-# =========================
-# HELPERS
-# =========================
-def send_telegram(message):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+CHECK_DELAY = 30  # seconds
+# ============================================
+
+client = Client()
+
+sent_signals = {}
+daily_counter = {}
+
+# ---------- TELEGRAM ----------
+def send_message(text):
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": CHAT_ID,
-        "text": message,
+        "text": text,
         "parse_mode": "HTML"
     }
     requests.post(url, json=payload, timeout=10)
 
+# ---------- UTIL ----------
+def today_key():
+    return datetime.now(TIMEZONE).strftime("%Y-%m-%d")
 
-def get_symbols():
-    data = requests.get(f"{BINANCE_API}/exchangeInfo").json()
-    symbols = []
-    for s in data["symbols"]:
-        if s["status"] != "TRADING":
-            continue
-        if not s["symbol"].endswith("USDT"):
-            continue
-        base = s["baseAsset"]
-        if base in EXCLUDED_COINS:
-            continue
-        symbols.append(s["symbol"])
-    return symbols
+def can_send(symbol):
+    now = time.time()
+    if symbol in sent_signals:
+        if now - sent_signals[symbol] < COOLDOWN_HOURS * 3600:
+            return False
+    return True
 
+def daily_limit_ok():
+    key = today_key()
+    if key not in daily_counter:
+        daily_counter[key] = 0
+    return daily_counter[key] < MAX_SIGNALS_PER_DAY
 
-def get_klines(symbol, interval, limit=50):
-    url = f"{BINANCE_API}/klines"
-    params = {"symbol": symbol, "interval": interval, "limit": limit}
-    return requests.get(url, params=params, timeout=10).json()
+# ---------- DATA ----------
+def get_klines(symbol, limit=30):
+    return client.get_klines(symbol=symbol, interval=INTERVAL, limit=limit)
 
+def get_24h_volume(symbol):
+    data = client.get_ticker(symbol=symbol)
+    return float(data["quoteVolume"])
 
-def get_ticker(symbol):
-    url = f"{BINANCE_API}/ticker/24hr"
-    params = {"symbol": symbol}
-    return requests.get(url, params=params, timeout=10).json()
-
-
-# =========================
-# STRATEGY (بسيطة + حقيقية)
-# =========================
+# ---------- ANALYSIS ----------
 def analyze(symbol):
-    klines_5m = get_klines(symbol, INTERVAL_MAIN)
-    klines_15m = get_klines(symbol, INTERVAL_CONFIRM)
+    try:
+        klines = get_klines(symbol)
+        closes = [float(k[4]) for k in klines]
+        volumes = [float(k[5]) for k in klines]
 
-    if len(klines_5m) < 20 or len(klines_15m) < 20:
-        return None
+        last_close = closes[-1]
+        prev_close = closes[-2]
 
-    closes_5m = [float(k[4]) for k in klines_5m]
-    volumes_5m = [float(k[5]) for k in klines_5m]
+        price_change = ((last_close - prev_close) / prev_close) * 100
 
-    closes_15m = [float(k[4]) for k in klines_15m]
+        avg_volume = sum(volumes[:-1]) / (len(volumes) - 1)
+        last_volume = volumes[-1]
 
-    # اتجاه بسيط
-    trend_5m = closes_5m[-1] > closes_5m[-5]
-    trend_15m = closes_15m[-1] > closes_15m[-5]
+        vol_24h = get_24h_volume(symbol)
 
-    # فوليوم
-    avg_vol = sum(volumes_5m[-10:]) / 10
-    last_vol = volumes_5m[-1]
+        if price_change < PRICE_MOVE_MIN:
+            return None
 
-    if trend_5m and trend_15m and last_vol > avg_vol * 1.5:
-        entry = closes_5m[-1]
-        tp1 = round(entry * 1.02, 6)
-        tp2 = round(entry * 1.04, 6)
-        tp3 = round(entry * 1.06, 6)
-        sl = round(entry * 0.97, 6)
+        if last_volume < avg_volume * VOLUME_SPIKE_MULTIPLIER:
+            return None
+
+        if vol_24h < MIN_24H_VOLUME:
+            return None
 
         return {
-            "entry": entry,
-            "tp1": tp1,
-            "tp2": tp2,
-            "tp3": tp3,
-            "sl": sl
+            "price": last_close,
+            "change": price_change,
+            "volume_24h": vol_24h
         }
 
-    return None
+    except Exception:
+        return None
 
+# ---------- SIGNAL ----------
+def build_message(symbol, data):
+    entry = data["price"]
+    tps = [round(entry * (1 + tp), 6) for tp in TP_LEVELS]
+    sl = round(entry * (1 - SL_PERCENT), 6)
 
-# =========================
-# MAIN LOOP
-# =========================
+    return f"""
+🚨 <b>فرصة فورية (Spot)</b>
+
+🔹 <b>الزوج:</b> {symbol}
+⏱ <b>الفريم:</b> 5 دقائق
+💰 <b>دخول:</b> {entry}
+
+🎯 <b>الأهداف:</b>
+1️⃣ {tps[0]}
+2️⃣ {tps[1]}
+3️⃣ {tps[2]}
+
+🛑 <b>وقف الخسارة:</b> {sl}
+
+📊 <b>حجم التداول 24h:</b> {int(data["volume_24h"]):,} USDT
+🕒 <b>التوقيت:</b> {datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M UTC")}
+
+⚔️ <b>ShinobiFlow</b> — اضرب واطلع 🎯
+"""
+
+# ---------- MAIN LOOP ----------
 def run():
-    send_telegram("🥷 <b>ShinobiFlow</b>\nتم تشغيل البوت بنجاح\nBinance Spot | فريم 5m / 15m")
-
-    symbols = get_symbols()
+    send_message("🟢 ShinobiFlow بدأ المراقبة…")
 
     while True:
         try:
-            for symbol in symbols:
-                ticker = get_ticker(symbol)
-                volume_usdt = float(ticker["quoteVolume"])
+            symbols = client.get_exchange_info()["symbols"]
 
-                if volume_usdt < MIN_VOLUME_USDT:
+            for s in symbols:
+                symbol = s["symbol"]
+
+                if not symbol.endswith("USDT"):
+                    continue
+                if s["status"] != "TRADING":
+                    continue
+                if not daily_limit_ok():
+                    break
+                if not can_send(symbol):
                     continue
 
-                signal = analyze(symbol)
-                if not signal:
-                    continue
+                result = analyze(symbol)
+                if result:
+                    msg = build_message(symbol, result)
+                    send_message(msg)
 
-                key = f"{symbol}_{int(signal['entry'])}"
-                if key in sent_alerts:
-                    continue
+                    sent_signals[symbol] = time.time()
+                    daily_counter[today_key()] += 1
 
-                sent_alerts.add(key)
-
-                message = f"""
-🚨 <b>فرصة فورية (Spot)</b>
-
-🪙 الزوج: <b>{symbol}</b>
-⏱️ الفريم: 5 دقائق (تأكيد 15)
-💰 دخول: <b>{signal['entry']}</b>
-
-🎯 الأهداف:
-1️⃣ {signal['tp1']}
-2️⃣ {signal['tp2']}
-3️⃣ {signal['tp3']}
-
-🛑 وقف الخسارة:
-{signal['sl']}
-
-📊 حجم التداول 24h:
-{int(volume_usdt):,} USDT
-
-🕒 التوقيت:
-{datetime.utcnow().strftime('%Y-%m-%d %H:%M')} UTC
-
-⚔️ ShinobiFlow – تحرّك بهدوء
-"""
-                send_telegram(message)
+                    time.sleep(2)
 
             time.sleep(CHECK_DELAY)
 
         except Exception as e:
-            send_telegram(f"⚠️ خطأ مؤقت:\n{e}")
-            time.sleep(30)
+            time.sleep(10)
 
-
+# ---------- START ----------
 if __name__ == "__main__":
     run()
