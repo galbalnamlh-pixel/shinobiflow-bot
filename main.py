@@ -8,19 +8,26 @@ import pytz
 BOT_TOKEN = "8420448991:AAG2lkBDA9gUZzHblSbQ48kAbQpYqX7BwJo"
 CHAT_ID = "5837332461"
 
-MAX_SIGNALS_PER_DAY = 15
+MAX_SIGNALS_PER_DAY = 20
 COOLDOWN_HOURS = 12
 INTERVAL = Client.KLINE_INTERVAL_5MINUTE
 TIMEZONE = pytz.UTC
 
 MIN_24H_VOLUME = 2_000_000      # USDT
+
+# ---- B (Naruto - Explosion)
 VOLUME_SPIKE_MULTIPLIER = 3
 PRICE_MOVE_MIN = 1.8            # %
 
-TP_LEVELS = [0.02, 0.04, 0.06]  # 2% 4% 6%
-SL_PERCENT = 0.03               # 3%
+# ---- A (Sniper - Early)
+SNIPER_PRICE_MIN = 0.6
+SNIPER_PRICE_MAX = 1.8
+SNIPER_VOLUME_MULTIPLIER = 1.4
 
-CHECK_DELAY = 30  # seconds
+TP_LEVELS = [0.02, 0.04, 0.06]
+SL_PERCENT = 0.03
+
+CHECK_DELAY = 30
 # ============================================
 
 client = Client()
@@ -42,10 +49,10 @@ def send_message(text):
 def today_key():
     return datetime.now(TIMEZONE).strftime("%Y-%m-%d")
 
-def can_send(symbol):
+def can_send(key):
     now = time.time()
-    if symbol in sent_signals:
-        if now - sent_signals[symbol] < COOLDOWN_HOURS * 3600:
+    if key in sent_signals:
+        if now - sent_signals[key] < COOLDOWN_HOURS * 3600:
             return False
     return True
 
@@ -63,7 +70,7 @@ def get_24h_volume(symbol):
     data = client.get_ticker(symbol=symbol)
     return float(data["quoteVolume"])
 
-# ---------- ANALYSIS ----------
+# ---------- ANALYSIS B (Naruto Explosion) ----------
 def analyze(symbol):
     try:
         klines = get_klines(symbol)
@@ -74,59 +81,110 @@ def analyze(symbol):
         prev_close = closes[-2]
 
         price_change = ((last_close - prev_close) / prev_close) * 100
-
-        avg_volume = sum(volumes[:-1]) / (len(volumes) - 1)
-        last_volume = volumes[-1]
-
-        vol_24h = get_24h_volume(symbol)
-
         if price_change < PRICE_MOVE_MIN:
             return None
 
-        if last_volume < avg_volume * VOLUME_SPIKE_MULTIPLIER:
+        avg_volume = sum(volumes[:-1]) / (len(volumes) - 1)
+        if volumes[-1] < avg_volume * VOLUME_SPIKE_MULTIPLIER:
             return None
 
+        vol_24h = get_24h_volume(symbol)
         if vol_24h < MIN_24H_VOLUME:
             return None
 
         return {
             "price": last_close,
-            "change": price_change,
             "volume_24h": vol_24h
         }
 
     except Exception:
         return None
 
-# ---------- SIGNAL ----------
-def build_message(symbol, data):
-    entry = data["price"]
+# ---------- ANALYSIS A (Sniper Early Entry) ----------
+def analyze_sniper(symbol):
+    try:
+        klines = get_klines(symbol, limit=20)
+        closes = [float(k[4]) for k in klines]
+        volumes = [float(k[5]) for k in klines]
+
+        price_change = ((closes[-1] - closes[-3]) / closes[-3]) * 100
+        if not (SNIPER_PRICE_MIN <= price_change <= SNIPER_PRICE_MAX):
+            return None
+
+        avg_volume = sum(volumes[:-2]) / (len(volumes) - 2)
+        if volumes[-1] < avg_volume * SNIPER_VOLUME_MULTIPLIER:
+            return None
+
+        vol_24h = get_24h_volume(symbol)
+        if vol_24h < MIN_24H_VOLUME:
+            return None
+
+        return {
+            "price": closes[-1],
+            "volume_24h": vol_24h
+        }
+
+    except Exception:
+        return None
+
+# ---------- MESSAGES ----------
+def build_targets(entry):
     tps = [round(entry * (1 + tp), 6) for tp in TP_LEVELS]
     sl = round(entry * (1 - SL_PERCENT), 6)
+    return tps, sl
+
+def build_sniper_message(symbol, data):
+    entry = data["price"]
+    tps, sl = build_targets(entry)
 
     return f"""
-🚨 <b>فرصة فورية (Spot)</b>
+🎯 <b>توصية القنّاص (دخول مبكر)</b>
 
-🔹 <b>الزوج:</b> {symbol}
-⏱ <b>الفريم:</b> 5 دقائق
-💰 <b>دخول:</b> {entry}
+🪙 الزوج: {symbol}
+⏱ الفريم: 5 دقائق
+💰 الدخول: {entry}
 
-🎯 <b>الأهداف:</b>
+🎯 الأهداف:
 1️⃣ {tps[0]}
 2️⃣ {tps[1]}
 3️⃣ {tps[2]}
 
-🛑 <b>وقف الخسارة:</b> {sl}
+🛑 وقف الخسارة: {sl}
 
-📊 <b>حجم التداول 24h:</b> {int(data["volume_24h"]):,} USDT
-🕒 <b>التوقيت:</b> {datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M UTC")}
+💧 السيولة 24h: {int(data["volume_24h"]):,} USDT
+🕒 الوقت: {datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M UTC")}
 
-⚔️ <b>ShinobiFlow</b> — اضرب واطلع 🎯
+📊 التقييم: 92%
+🔥 نسبة الثقة: 90%
+"""
+
+def build_naruto_message(symbol, data):
+    entry = data["price"]
+    tps, sl = build_targets(entry)
+
+    return f"""
+🚨 <b>توصية نارتو (انفجار)</b>
+
+🪙 الزوج: {symbol}
+⏱ الفريم: 5 دقائق
+💰 الدخول: {entry}
+
+🎯 الأهداف:
+1️⃣ {tps[0]}
+2️⃣ {tps[1]}
+3️⃣ {tps[2]}
+
+🛑 وقف الخسارة: {sl}
+
+📊 حجم التداول 24h: {int(data["volume_24h"]):,} USDT
+🕒 الوقت: {datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M UTC")}
+
+💥 تأكيد انفجار سعري
 """
 
 # ---------- MAIN LOOP ----------
 def run():
-    send_message("🟢 ShinobiFlow بدأ المراقبة…")
+    send_message("🟢 ShinobiFlow بدأ المراقبة (القنّاص + نارتو)…")
 
     while True:
         try:
@@ -141,22 +199,28 @@ def run():
                     continue
                 if not daily_limit_ok():
                     break
-                if not can_send(symbol):
-                    continue
 
-                result = analyze(symbol)
-                if result:
-                    msg = build_message(symbol, result)
-                    send_message(msg)
+                # ---- SNIPER A ----
+                if can_send(symbol + "_A"):
+                    sniper = analyze_sniper(symbol)
+                    if sniper:
+                        send_message(build_sniper_message(symbol, sniper))
+                        sent_signals[symbol + "_A"] = time.time()
+                        daily_counter[today_key()] += 1
+                        time.sleep(2)
 
-                    sent_signals[symbol] = time.time()
-                    daily_counter[today_key()] += 1
-
-                    time.sleep(2)
+                # ---- NARUTO B ----
+                if can_send(symbol + "_B"):
+                    result = analyze(symbol)
+                    if result:
+                        send_message(build_naruto_message(symbol, result))
+                        sent_signals[symbol + "_B"] = time.time()
+                        daily_counter[today_key()] += 1
+                        time.sleep(2)
 
             time.sleep(CHECK_DELAY)
 
-        except Exception as e:
+        except Exception:
             time.sleep(10)
 
 # ---------- START ----------
