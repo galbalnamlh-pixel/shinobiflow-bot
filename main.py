@@ -38,7 +38,7 @@ client = Client()
 
 sent_signals = {}
 daily_counter = {}
-active_snipers = {}  # symbol -> data
+active_snipers = {}
 
 stats = {
     "A_win": 0,
@@ -51,13 +51,11 @@ last_report_date = None
 
 # ---------- TELEGRAM ----------
 def send_message(text):
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": CHAT_ID,
-        "text": text,
-        "parse_mode": "HTML"
-    }
-    requests.post(url, json=payload, timeout=10)
+    requests.post(
+        f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+        json={"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML"},
+        timeout=10
+    )
 
 # ---------- UTIL ----------
 def today_key():
@@ -68,9 +66,8 @@ def can_send(key):
     return key not in sent_signals or now - sent_signals[key] > COOLDOWN_HOURS * 3600
 
 def daily_limit_ok():
-    key = today_key()
-    daily_counter.setdefault(key, 0)
-    return daily_counter[key] < MAX_SIGNALS_PER_DAY
+    daily_counter.setdefault(today_key(), 0)
+    return daily_counter[today_key()] < MAX_SIGNALS_PER_DAY
 
 # ---------- DATA ----------
 def get_klines(symbol, limit=30):
@@ -84,12 +81,12 @@ def get_price(symbol):
 
 # ---------- ANALYSIS ----------
 def analyze_sniper(symbol):
-    klines = get_klines(symbol, limit=20)
-    closes = [float(k[4]) for k in klines]
-    volumes = [float(k[5]) for k in klines]
+    k = get_klines(symbol, 20)
+    closes = [float(x[4]) for x in k]
+    volumes = [float(x[5]) for x in k]
 
-    price_change = ((closes[-1] - closes[-3]) / closes[-3]) * 100
-    if not (SNIPER_PRICE_MIN <= price_change <= SNIPER_PRICE_MAX):
+    change = ((closes[-1] - closes[-3]) / closes[-3]) * 100
+    if not SNIPER_PRICE_MIN <= change <= SNIPER_PRICE_MAX:
         return None
 
     avg_vol = sum(volumes[:-2]) / (len(volumes) - 2)
@@ -99,12 +96,12 @@ def analyze_sniper(symbol):
     if get_24h_volume(symbol) < MIN_24H_VOLUME:
         return None
 
-    return {"entry": closes[-1]}
+    return closes[-1]
 
 def analyze_naruto(symbol):
-    klines = get_klines(symbol)
-    closes = [float(k[4]) for k in klines]
-    volumes = [float(k[5]) for k in klines]
+    k = get_klines(symbol)
+    closes = [float(x[4]) for x in k]
+    volumes = [float(x[5]) for x in k]
 
     change = ((closes[-1] - closes[-2]) / closes[-2]) * 100
     if change < PRICE_MOVE_MIN:
@@ -117,7 +114,7 @@ def analyze_naruto(symbol):
     if get_24h_volume(symbol) < MIN_24H_VOLUME:
         return None
 
-    return {"entry": closes[-1]}
+    return closes[-1]
 
 # ---------- TARGETS ----------
 def build_targets(entry):
@@ -128,14 +125,13 @@ def build_targets(entry):
 # ---------- MESSAGES ----------
 def sniper_message(symbol, entry, now):
     tps, sl = build_targets(entry)
-    time_str = now.strftime("%Y-%m-%d %H:%M UTC")
     return f"""
 🎯 <b>توصية القنّاص (دخول مبكر)</b>
 
 🪙 الزوج: {symbol}
 💰 الدخول: {entry}
 ⏱ الفريم: 5 دقائق
-🕒 وقت الإشارة: {time_str}
+🕒 وقت الإشارة: {now.strftime('%Y-%m-%d %H:%M UTC')}
 
 🎯 الأهداف:
 1️⃣ {tps[0]}
@@ -145,7 +141,6 @@ def sniper_message(symbol, entry, now):
 🛑 وقف الخسارة: {sl}
 
 🔥 نسبة الثقة: 90%
-📊 التقييم: 92%
 """
 
 def sniper_fail_message(symbol):
@@ -153,28 +148,32 @@ def sniper_fail_message(symbol):
 ⚠️ <b>فشل توصية القنّاص</b>
 
 🪙 الزوج: {symbol}
-⏱ لم يصل الهدف الأول خلال 45 دقيقة
+❌ لم يصل الهدف الأول خلال 45 دقيقة
 📉 ضعف الاستمرارية السعرية
-
-⚔️ ShinobiFlow — الشفافية قبل الربح
 """
 
-def naruto_message(symbol, entry):
+def naruto_message(symbol, entry, now):
     tps, sl = build_targets(entry)
     return f"""
-🚨 <b>توصية نارتو (انفجار)</b>
+🚨 <b>شمعة انفجار – جرس فرص</b>
 
 🪙 الزوج: {symbol}
-💰 الدخول: {entry}
+💰 السعر الحالي: {entry}
+⏱ الفريم: 5 دقائق
+🕒 وقت الإشارة: {now.strftime('%Y-%m-%d %H:%M UTC')}
 
-🎯 الأهداف:
+🎯 مستويات مقترحة:
 1️⃣ {tps[0]}
 2️⃣ {tps[1]}
 3️⃣ {tps[2]}
 
-🛑 وقف الخسارة: {sl}
+🛑 وقف خسارة مرجعي: {sl}
 
-💥 تأكيد انفجار سعري
+⚠️ <b>تنبيه مهم:</b>
+بداية انفجار سعري — الدخول بعد المراقبة
+وتحمل كامل مسؤولية المخاطرة
+
+🔥 هذه شمعة الفرص… القرار بيدك
 """
 
 def daily_report():
@@ -182,14 +181,11 @@ def daily_report():
 📊 <b>تقرير ShinobiFlow اليومي</b>
 
 🎯 القنّاص:
-✅ ناجحة: {stats['A_win']}
-❌ فاشلة: {stats['A_fail']}
+✅ {stats['A_win']} | ❌ {stats['A_fail']}
 
 🚨 نارتو:
-✅ ناجحة: {stats['B_win']}
-❌ فاشلة: {stats['B_fail']}
+📌 إشارات انفجار: {stats['B_win']}
 
-📌 الإجمالي: {sum(stats.values())}
 ⚔️ تداول بعقل لا بعاطفة
 """
 
@@ -201,17 +197,13 @@ def run():
     while True:
         now = datetime.now(TIMEZONE)
 
-        # --- Daily Report ---
         if last_report_date != today_key() and now.hour == 23 and now.minute >= 59:
             send_message(daily_report())
             last_report_date = today_key()
-            for k in stats:
-                stats[k] = 0
+            for k in stats: stats[k] = 0
 
-        # --- Check active snipers ---
         for symbol, data in list(active_snipers.items()):
-            price = get_price(symbol)
-            if price >= data["tp1"]:
+            if get_price(symbol) >= data["tp1"]:
                 stats["A_win"] += 1
                 del active_snipers[symbol]
             elif now - data["time"] > timedelta(minutes=SNIPER_TIMEOUT_MINUTES):
@@ -222,7 +214,6 @@ def run():
         try:
             for s in client.get_exchange_info()["symbols"]:
                 symbol = s["symbol"]
-
                 if (
                     not symbol.endswith("USDT")
                     or symbol in EXCLUDED_SYMBOLS
@@ -233,26 +224,21 @@ def run():
                 if not daily_limit_ok():
                     break
 
-                if can_send(symbol + "_A"):
-                    sniper = analyze_sniper(symbol)
-                    if sniper:
-                        entry = sniper["entry"]
-                        tps, _ = build_targets(entry)
-                        active_snipers[symbol] = {
-                            "entry": entry,
-                            "tp1": tps[0],
-                            "time": now
-                        }
+                if can_send(symbol+"_A"):
+                    entry = analyze_sniper(symbol)
+                    if entry:
+                        tps,_ = build_targets(entry)
+                        active_snipers[symbol] = {"tp1":tps[0],"time":now}
                         send_message(sniper_message(symbol, entry, now))
-                        sent_signals[symbol + "_A"] = time.time()
+                        sent_signals[symbol+"_A"] = time.time()
                         daily_counter[today_key()] += 1
 
-                if can_send(symbol + "_B"):
-                    naruto = analyze_naruto(symbol)
-                    if naruto:
-                        send_message(naruto_message(symbol, naruto["entry"]))
+                if can_send(symbol+"_B"):
+                    entry = analyze_naruto(symbol)
+                    if entry:
+                        send_message(naruto_message(symbol, entry, now))
                         stats["B_win"] += 1
-                        sent_signals[symbol + "_B"] = time.time()
+                        sent_signals[symbol+"_B"] = time.time()
                         daily_counter[today_key()] += 1
 
             time.sleep(CHECK_DELAY)
