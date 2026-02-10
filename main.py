@@ -15,7 +15,10 @@ TIMEZONE = pytz.UTC
 
 MIN_24H_VOLUME = 2_000_000
 
-# ---- B (Naruto - Explosion)
+# ---- Excluded majors (Market indicators only)
+EXCLUDED_SYMBOLS = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT"]
+
+# ---- B (Naruto - Explosion) ❌ لم يتم المساس به
 VOLUME_SPIKE_MULTIPLIER = 3
 PRICE_MOVE_MIN = 1.8
 
@@ -123,14 +126,16 @@ def build_targets(entry):
     return tps, sl
 
 # ---------- MESSAGES ----------
-def sniper_message(symbol, entry):
+def sniper_message(symbol, entry, now):
     tps, sl = build_targets(entry)
+    time_str = now.strftime("%Y-%m-%d %H:%M UTC")
     return f"""
 🎯 <b>توصية القنّاص (دخول مبكر)</b>
 
 🪙 الزوج: {symbol}
 💰 الدخول: {entry}
 ⏱ الفريم: 5 دقائق
+🕒 وقت الإشارة: {time_str}
 
 🎯 الأهداف:
 1️⃣ {tps[0]}
@@ -148,7 +153,7 @@ def sniper_fail_message(symbol):
 ⚠️ <b>فشل توصية القنّاص</b>
 
 🪙 الزوج: {symbol}
-❌ لم يصل الهدف الأول خلال 45 دقيقة
+⏱ لم يصل الهدف الأول خلال 45 دقيقة
 📉 ضعف الاستمرارية السعرية
 
 ⚔️ ShinobiFlow — الشفافية قبل الربح
@@ -185,7 +190,7 @@ def daily_report():
 ❌ فاشلة: {stats['B_fail']}
 
 📌 الإجمالي: {sum(stats.values())}
-⚔️ ShinobiFlow — تداول بعقل لا بعاطفة
+⚔️ تداول بعقل لا بعاطفة
 """
 
 # ---------- MAIN LOOP ----------
@@ -217,12 +222,18 @@ def run():
         try:
             for s in client.get_exchange_info()["symbols"]:
                 symbol = s["symbol"]
-                if not symbol.endswith("USDT") or s["status"] != "TRADING":
+
+                if (
+                    not symbol.endswith("USDT")
+                    or symbol in EXCLUDED_SYMBOLS
+                    or s["status"] != "TRADING"
+                ):
                     continue
+
                 if not daily_limit_ok():
                     break
 
-                if can_send(symbol+"_A"):
+                if can_send(symbol + "_A"):
                     sniper = analyze_sniper(symbol)
                     if sniper:
                         entry = sniper["entry"]
@@ -232,16 +243,16 @@ def run():
                             "tp1": tps[0],
                             "time": now
                         }
-                        send_message(sniper_message(symbol, entry))
-                        sent_signals[symbol+"_A"] = time.time()
+                        send_message(sniper_message(symbol, entry, now))
+                        sent_signals[symbol + "_A"] = time.time()
                         daily_counter[today_key()] += 1
 
-                if can_send(symbol+"_B"):
+                if can_send(symbol + "_B"):
                     naruto = analyze_naruto(symbol)
                     if naruto:
                         send_message(naruto_message(symbol, naruto["entry"]))
                         stats["B_win"] += 1
-                        sent_signals[symbol+"_B"] = time.time()
+                        sent_signals[symbol + "_B"] = time.time()
                         daily_counter[today_key()] += 1
 
             time.sleep(CHECK_DELAY)
